@@ -71,6 +71,52 @@ func (c *Creator) Create(tarPath, vmID string) (string, error) {
 	return ext4Path, nil
 }
 
+// CreateFromDir creates an ext4 filesystem from a directory instead of a tar file
+func (c *Creator) CreateFromDir(sourceDir, vmID string) (string, error) {
+	ext4Path := filepath.Join(c.rootfsDir, fmt.Sprintf("%s.ext4", vmID))
+	mountPoint := filepath.Join(c.mountDir, vmID)
+	
+	defer func() {
+		c.unmount(mountPoint)
+		c.removeMount(mountPoint)
+	}()
+	
+	if err := c.checkSudoAvailable(); err != nil {
+		return "", fmt.Errorf("sudo access required: %w", err)
+	}
+	
+	if err := c.createSparseFile(ext4Path); err != nil {
+		return "", fmt.Errorf("failed to create sparse file: %w", err)
+	}
+	
+	if err := c.formatExt4(ext4Path); err != nil {
+		c.cleanup(ext4Path)
+		return "", fmt.Errorf("failed to format ext4: %w", err)
+	}
+	
+	if err := c.createMountPoint(mountPoint); err != nil {
+		c.cleanup(ext4Path)
+		return "", fmt.Errorf("failed to create mount point: %w", err)
+	}
+	
+	if err := c.mount(ext4Path, mountPoint); err != nil {
+		c.cleanup(ext4Path)
+		return "", fmt.Errorf("failed to mount: %w", err)
+	}
+	
+	if err := c.copyDir(sourceDir, mountPoint); err != nil {
+		c.cleanup(ext4Path)
+		return "", fmt.Errorf("failed to copy directory: %w", err)
+	}
+	
+	if err := c.unmount(mountPoint); err != nil {
+		c.cleanup(ext4Path)
+		return "", fmt.Errorf("failed to unmount: %w", err)
+	}
+	
+	return ext4Path, nil
+}
+
 func (c *Creator) checkSudoAvailable() error {
 	cmd := exec.Command("sudo", "-n", "true")
 	if err := cmd.Run(); err != nil {
@@ -131,6 +177,20 @@ func (c *Creator) extractTar(tarPath, mountPoint string) error {
 	
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to extract tar: %w", err)
+	}
+	
+	return nil
+}
+
+func (c *Creator) copyDir(sourceDir, mountPoint string) error {
+	fmt.Printf("Copying directory %s to %s\n", sourceDir, mountPoint)
+	
+	cmd := exec.Command("sudo", "cp", "-a", sourceDir+"/.", mountPoint)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to copy directory: %w", err)
 	}
 	
 	return nil
