@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -20,7 +21,7 @@ import (
 type Manager struct {
 	config 			  *config.Config
 	store         *state.Store
-	imageHandler  *image.Handler
+	imageService  image.ImageService
 	rootfsCreator *rootfs.Creator
 }
 
@@ -40,9 +41,9 @@ func NewManager() *Manager {
 		log.Fatal("Error initializing store:", err)
 	}
 
-	imageHandler, err := image.NewHandler(cfg.GetImageDir())
+	imageService, err := image.NewManager(cfg.GetImageDir())
 	if err != nil {
-		log.Fatal("Error initializing image handler:", err)
+		log.Fatal("Error initializing image service:", err)
 	}
 
 	rootfsCreator, err := rootfs.NewCreator(cfg.GetRootfsDir())
@@ -53,7 +54,7 @@ func NewManager() *Manager {
 	return &Manager{
 		config:        cfg,
 		store:         store,
-		imageHandler:  imageHandler,
+		imageService:  imageService,
 		rootfsCreator: rootfsCreator,
 	}
 }
@@ -62,19 +63,26 @@ func (m *Manager) RunVM(imageName string) (string, error) {
 	fmt.Printf("Starting VM for image: %s\n", imageName)
 
 	vmID := uuid.New().String()
+	ctx := context.Background()
 
-	tarPath, err := m.imageHandler.PullAndExport(imageName)
+	// Pull the image if not exists locally
+	_, err := m.imageService.PullImage(ctx, imageName)
 	if err != nil {
-		return "", fmt.Errorf("failed to pull and export image: %w", err)
+		return "", fmt.Errorf("failed to pull image: %w", err)
 	}
 
-	defer func() {
-		if cleanupErr := m.imageHandler.CleanupTar(tarPath); cleanupErr != nil {
-			fmt.Printf("Warning: failed to cleanup tar file: %v\n", cleanupErr)
-		}
-	}()
+	// Create temporary directory for unpacking
+	tempDir := filepath.Join("/tmp", "micropod-unpack-"+vmID)
+	defer os.RemoveAll(tempDir)
 
-	rootfsPath, err := m.rootfsCreator.Create(tarPath, vmID)
+	// Unpack the image to the temporary directory
+	_, err = m.imageService.Unpack(ctx, imageName, tempDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to unpack image: %w", err)
+	}
+
+	// Create ext4 rootfs from the unpacked directory
+	rootfsPath, err := m.rootfsCreator.CreateFromDir(tempDir, vmID)
 	if err != nil {
 		return "", fmt.Errorf("failed to create rootfs: %w", err)
 	}
