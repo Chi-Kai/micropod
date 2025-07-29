@@ -14,6 +14,8 @@ var rootCmd = &cobra.Command{
 	Long:  `MicroPod is a command line tool that runs OCI container images in Firecracker microVMs for enhanced security isolation.`,
 }
 
+var portMappings []string
+
 var runCmd = &cobra.Command{
 	Use:   "run [image]",
 	Short: "Run a container image in a Firecracker microVM",
@@ -22,7 +24,7 @@ var runCmd = &cobra.Command{
 		imageName := args[0]
 		
 		mgr := manager.NewManager()
-		vmID, err := mgr.RunVM(imageName)
+		vmID, err := mgr.RunVM(imageName, portMappings)
 		if err != nil {
 			return fmt.Errorf("failed to run VM: %w", err)
 		}
@@ -77,6 +79,7 @@ var stopCmd = &cobra.Command{
 }
 
 func init() {
+	runCmd.Flags().StringSliceVarP(&portMappings, "publish", "p", []string{}, "Publish a VM's port(s) to the host (e.g., 8080:80)")
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(stopCmd)

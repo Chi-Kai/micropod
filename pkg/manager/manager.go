@@ -14,6 +14,7 @@ import (
 	"micropod/pkg/config"
 	"micropod/pkg/firecracker"
 	"micropod/pkg/image"
+	"micropod/pkg/network"
 	"micropod/pkg/rootfs"
 	"micropod/pkg/state"
 )
@@ -59,15 +60,22 @@ func NewManager() *Manager {
 	}
 }
 
-func (m *Manager) RunVM(imageName string) (string, error) {
+func (m *Manager) RunVM(imageName string, portMappings []string) (string, error) {
 	fmt.Printf("Starting VM for image: %s\n", imageName)
 
 	vmID := uuid.New().String()
 	ctx := context.Background()
 
-	// Pull the image if not exists locally
-	_, err := m.imageService.PullImage(ctx, imageName)
+	// Setup network
+	netConfig, err := network.Setup(vmID, portMappings)
 	if err != nil {
+		return "", fmt.Errorf("failed to setup network: %w", err)
+	}
+
+	// Pull the image if not exists locally
+	_, err = m.imageService.PullImage(ctx, imageName)
+	if err != nil {
+		network.Teardown(netConfig)
 		return "", fmt.Errorf("failed to pull image: %w", err)
 	}
 
@@ -78,18 +86,22 @@ func (m *Manager) RunVM(imageName string) (string, error) {
 	// Unpack the image to the temporary directory
 	_, err = m.imageService.Unpack(ctx, imageName, tempDir)
 	if err != nil {
+		network.Teardown(netConfig)
 		return "", fmt.Errorf("failed to unpack image: %w", err)
 	}
 
 	// Create ext4 rootfs from the unpacked directory
 	rootfsPath, err := m.rootfsCreator.CreateFromDir(tempDir, vmID)
 	if err != nil {
+		network.Teardown(netConfig)
 		return "", fmt.Errorf("failed to create rootfs: %w", err)
 	}
 
 	kernelPath := m.config.GetKernelPath()
-
 	socketPath := m.getSocketPath(vmID)
+
+	// Construct kernel boot args with network configuration
+	ipBootArg := fmt.Sprintf("ip=%s::%s:255.255.255.0::eth0:none", netConfig.GuestIP, netConfig.GatewayIP)
 
 	client := firecracker.NewClient(socketPath)
 
@@ -98,7 +110,8 @@ func (m *Manager) RunVM(imageName string) (string, error) {
 		MemoryMB: 512,
 	}
 
-	if err := client.LaunchVM(kernelPath, rootfsPath, config.VCPUs, config.MemoryMB); err != nil {
+	if err := client.LaunchVM(kernelPath, rootfsPath, config.VCPUs, config.MemoryMB, ipBootArg, netConfig); err != nil {
+		network.Teardown(netConfig)
 		m.rootfsCreator.RemoveRootfs(rootfsPath)
 		return "", fmt.Errorf("failed to launch VM: %w", err)
 	}
@@ -111,11 +124,13 @@ func (m *Manager) RunVM(imageName string) (string, error) {
 		VMSocketPath:   socketPath,
 		RootfsPath:     rootfsPath,
 		KernelPath:     kernelPath,
+		Network:        netConfig,
 		CreatedAt:      time.Now(),
 	}
 
 	if err := m.store.AddVM(vm); err != nil {
 		client.Stop()
+		network.Teardown(netConfig)
 		m.rootfsCreator.RemoveRootfs(rootfsPath)
 		return "", fmt.Errorf("failed to store VM state: %w", err)
 	}
@@ -126,6 +141,7 @@ func (m *Manager) RunVM(imageName string) (string, error) {
 	fmt.Printf("  PID: %d\n", client.GetPID())
 	fmt.Printf("  Socket: %s\n", socketPath)
 	fmt.Printf("  Rootfs: %s\n", rootfsPath)
+	fmt.Printf("  Network: %s -> %s\n", netConfig.GuestIP, netConfig.TapDevice)
 
 	return vmID, nil
 }
@@ -212,6 +228,13 @@ func (m *Manager) killProcess(pid int) error {
 
 func (m *Manager) cleanup(vm *state.VM) error {
 	var errors []error
+
+	// Clean up network resources
+	if vm.Network != nil {
+		if err := network.Teardown(vm.Network); err != nil {
+			errors = append(errors, fmt.Errorf("failed to teardown network: %w", err))
+		}
+	}
 
 	if err := os.Remove(vm.VMSocketPath); err != nil && !os.IsNotExist(err) {
 		errors = append(errors, fmt.Errorf("failed to remove socket: %w", err))

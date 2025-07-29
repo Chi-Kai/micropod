@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"syscall"
 	"time"
+
+	"micropod/pkg/network"
 )
 
 type Client struct {
@@ -37,6 +39,12 @@ type MachineConfig struct {
 	MemSizeMib int `json:"mem_size_mib"`
 }
 
+type NetworkInterface struct {
+	IfaceID     string `json:"iface_id"`
+	HostDevName string `json:"host_dev_name"`
+	GuestMAC    string `json:"guest_mac"`
+}
+
 type Action struct {
 	ActionType string `json:"action_type"`
 }
@@ -55,7 +63,7 @@ func NewClient(socketPath string) *Client {
 	}
 }
 
-func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int) error {
+func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int, bootArgs string, netConfig *network.Config) error {
 	if err := c.startFirecrackerProcess(); err != nil {
 		return fmt.Errorf("failed to start firecracker process: %w", err)
 	}
@@ -65,7 +73,7 @@ func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int
 		return fmt.Errorf("failed to wait for socket: %w", err)
 	}
 
-	if err := c.configureBootSource(kernelPath); err != nil {
+	if err := c.configureBootSource(kernelPath, bootArgs); err != nil {
 		c.killProcess()
 		return fmt.Errorf("failed to configure boot source: %w", err)
 	}
@@ -78,6 +86,13 @@ func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int
 	if err := c.configureMachine(vcpus, memoryMB); err != nil {
 		c.killProcess()
 		return fmt.Errorf("failed to configure machine: %w", err)
+	}
+
+	if netConfig != nil {
+		if err := c.configureNetworkInterface(netConfig); err != nil {
+			c.killProcess()
+			return fmt.Errorf("failed to configure network interface: %w", err)
+		}
 	}
 
 	if err := c.startInstance(); err != nil {
@@ -145,10 +160,15 @@ func (c *Client) waitForSocket() error {
 	return fmt.Errorf("timeout waiting for socket %s", c.socketPath)
 }
 
-func (c *Client) configureBootSource(kernelPath string) error {
+func (c *Client) configureBootSource(kernelPath string, bootArgs string) error {
+	defaultBootArgs := "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw"
+	if bootArgs != "" {
+		defaultBootArgs = defaultBootArgs + " " + bootArgs
+	}
+
 	bootSource := BootSource{
 		KernelImagePath: kernelPath,
-		BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
+		BootArgs:        defaultBootArgs,
 	}
 
 	return c.makeAPIRequest("PUT", "/boot-source", bootSource)
@@ -172,6 +192,16 @@ func (c *Client) configureMachine(vcpus int, memoryMB int) error {
 	}
 
 	return c.makeAPIRequest("PUT", "/machine-config", machineConfig)
+}
+
+func (c *Client) configureNetworkInterface(netConfig *network.Config) error {
+	networkInterface := NetworkInterface{
+		IfaceID:     "eth0",
+		HostDevName: netConfig.TapDevice,
+		GuestMAC:    netConfig.GuestMAC,
+	}
+
+	return c.makeAPIRequest("PUT", "/network-interfaces/eth0", networkInterface)
 }
 
 func (c *Client) startInstance() error {

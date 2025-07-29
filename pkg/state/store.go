@@ -6,17 +6,20 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"micropod/pkg/network"
 )
 
 type VM struct {
-	ID             string    `json:"id"`
-	ImageName      string    `json:"imageName"`
-	State          string    `json:"state"`
-	FirecrackerPid int       `json:"firecrackerPid"`
-	VMSocketPath   string    `json:"vmSocketPath"`
-	RootfsPath     string    `json:"rootfsPath"`
-	KernelPath     string    `json:"kernelPath"`
-	CreatedAt      time.Time `json:"createdAt"`
+	ID             string           `json:"id"`
+	ImageName      string           `json:"imageName"`
+	State          string           `json:"state"`
+	FirecrackerPid int              `json:"firecrackerPid"`
+	VMSocketPath   string           `json:"vmSocketPath"`
+	RootfsPath     string           `json:"rootfsPath"`
+	KernelPath     string           `json:"kernelPath"`
+	Network        *network.Config  `json:"network,omitempty"`
+	CreatedAt      time.Time        `json:"createdAt"`
 }
 
 type Store struct {
