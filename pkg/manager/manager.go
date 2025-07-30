@@ -99,6 +99,7 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 
 	kernelPath := m.config.GetKernelPath()
 	socketPath := m.getSocketPath(vmID)
+	logFilePath := m.config.GetLogPath(vmID)
 
 	// Construct kernel boot args with network configuration
 	ipBootArg := fmt.Sprintf("ip=%s::%s:255.255.255.0::eth0:none", netConfig.GuestIP, netConfig.GatewayIP)
@@ -110,7 +111,7 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 		MemoryMB: 512,
 	}
 
-	if err := client.LaunchVM(kernelPath, rootfsPath, config.VCPUs, config.MemoryMB, ipBootArg, netConfig); err != nil {
+	if err := client.LaunchVM(kernelPath, rootfsPath, config.VCPUs, config.MemoryMB, ipBootArg, netConfig, logFilePath); err != nil {
 		network.Teardown(netConfig)
 		m.rootfsCreator.RemoveRootfs(rootfsPath)
 		return "", fmt.Errorf("failed to launch VM: %w", err)
@@ -125,6 +126,7 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 		RootfsPath:     rootfsPath,
 		KernelPath:     kernelPath,
 		Network:        netConfig,
+		LogFilePath:    logFilePath,
 		CreatedAt:      time.Now(),
 	}
 

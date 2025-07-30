@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"io"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"micropod/pkg/manager"
@@ -78,11 +81,65 @@ var stopCmd = &cobra.Command{
 	},
 }
 
+var logsCmd = &cobra.Command{
+	Use:   "logs [vm-id]",
+	Short: "Fetch the logs of a VM",
+	Args:  cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		vmID := args[0]
+
+		mgr := manager.NewManager()
+		
+		// Get VM from state store to find log file path
+		vms, err := mgr.ListVMs()
+		if err != nil {
+			return fmt.Errorf("failed to list VMs: %w", err)
+		}
+
+		var logFilePath string
+		found := false
+		for _, vm := range vms {
+			if vm.ID == vmID {
+				logFilePath = vm.LogFilePath
+				found = true
+				break
+			}
+		}
+
+		if !found {
+			return fmt.Errorf("VM %s not found", vmID)
+		}
+
+		// Open log file
+		logFile, err := os.Open(logFilePath)
+		if err != nil {
+			return fmt.Errorf("could not open log file: %w", err)
+		}
+		defer logFile.Close()
+
+		// Read and follow log file (like tail -f)
+		r := bufio.NewReader(logFile)
+		for {
+			line, err := r.ReadString('\n')
+			if len(line) > 0 {
+				fmt.Print(line)
+			}
+			if err == io.EOF {
+				// Wait a bit and try again for new content
+				time.Sleep(500 * time.Millisecond)
+			} else if err != nil {
+				return err
+			}
+		}
+	},
+}
+
 func init() {
 	runCmd.Flags().StringSliceVarP(&portMappings, "publish", "p", []string{}, "Publish a VM's port(s) to the host (e.g., 8080:80)")
 	rootCmd.AddCommand(runCmd)
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(stopCmd)
+	rootCmd.AddCommand(logsCmd)
 }
 
 func main() {

@@ -66,6 +66,30 @@ func (c *Config) GetImageDir() string {
 	return imageDir
 }
 
+func (c *Config) GetLogsDir() string {
+	logsDir := filepath.Join(c.ConfigDir, "logs")
+	if _, err := os.Stat(logsDir); os.IsNotExist(err) {
+		if err := os.MkdirAll(logsDir, 0755); err != nil {
+			log.Fatalf("Failed to create logs directory: %v", err)
+		}
+	}
+	return logsDir
+}
+
+func (c *Config) GetLogPath(vmID string) string {
+	logPath := filepath.Join(c.GetLogsDir(), vmID+".log")
+	
+	// Create empty console log file if it doesn't exist (this is where VM output goes)
+	if _, err := os.Stat(logPath); os.IsNotExist(err) {
+		file, err := os.Create(logPath)
+		if err != nil {
+			log.Fatalf("Failed to create console log file: %v", err)
+		}
+		file.Close()
+	}
+	return logPath
+}
+
 func (c *Config) EnsureConfigDir() error {
 	return os.MkdirAll(c.ConfigDir, 0755)
 }

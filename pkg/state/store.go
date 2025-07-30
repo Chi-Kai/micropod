@@ -19,6 +19,7 @@ type VM struct {
 	RootfsPath     string           `json:"rootfsPath"`
 	KernelPath     string           `json:"kernelPath"`
 	Network        *network.Config  `json:"network,omitempty"`
+	LogFilePath    string           `json:"logFilePath"`
 	CreatedAt      time.Time        `json:"createdAt"`
 }
 

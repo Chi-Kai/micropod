@@ -63,8 +63,8 @@ func NewClient(socketPath string) *Client {
 	}
 }
 
-func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int, bootArgs string, netConfig *network.Config) error {
-	if err := c.startFirecrackerProcess(); err != nil {
+func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int, bootArgs string, netConfig *network.Config, logPath string) error {
+	if err := c.startFirecrackerProcess(logPath); err != nil {
 		return fmt.Errorf("failed to start firecracker process: %w", err)
 	}
 
@@ -103,7 +103,7 @@ func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int
 	return nil
 }
 
-func (c *Client) startFirecrackerProcess() error {
+func (c *Client) startFirecrackerProcess(logPath string) error {
 	if err := c.checkFirecrackerBinary(); err != nil {
 		return err
 	}
@@ -117,6 +117,16 @@ func (c *Client) startFirecrackerProcess() error {
 	cmd := exec.Command("firecracker", "--api-sock", c.socketPath)
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Setpgid: true,
+	}
+
+	// Redirect VM's console output to log file for kernel and application logs
+	if logPath != "" {
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open log file: %w", err)
+		}
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
 	}
 
 	if err := cmd.Start(); err != nil {
