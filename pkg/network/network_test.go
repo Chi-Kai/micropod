@@ -27,7 +27,7 @@ func TestAllocateIP_Success(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vmIndex := hashVMID(tt.vmID) % 254 + 1
+			vmIndex := hashVMID(tt.vmID)%254 + 1
 			expectedIP := fmt.Sprintf("172.18.%d.2", vmIndex)
 			expectedGW := fmt.Sprintf("172.18.%d.1", vmIndex)
 
@@ -63,7 +63,7 @@ func TestAllocateIP_EdgeCases(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			vmIndex := hashVMID(tt.vmID) % 254 + 1
+			vmIndex := hashVMID(tt.vmID)%254 + 1
 			if vmIndex < 1 || vmIndex > 254 {
 				t.Errorf("VM index %d out of valid range [1, 254]", vmIndex)
 			}
@@ -153,7 +153,7 @@ func TestHashVMID_Consistency(t *testing.T) {
 	vmID := "vm-test-123"
 	hash1 := hashVMID(vmID)
 	hash2 := hashVMID(vmID)
-	
+
 	if hash1 != hash2 {
 		t.Errorf("Hash function not consistent: got %d and %d for same input", hash1, hash2)
 	}
@@ -165,7 +165,7 @@ func TestHashVMID_Distribution(t *testing.T) {
 		"vm-1", "vm-2", "vm-3", "vm-4", "vm-5",
 		"test-a", "test-b", "test-c", "test-d", "test-e",
 	}
-	
+
 	hashes := make(map[int]bool)
 	for _, vmID := range vmIDs {
 		hash := hashVMID(vmID)

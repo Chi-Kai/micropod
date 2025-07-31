@@ -4,26 +4,33 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
+	pb "micropod/pkg/agent/api"
 	"micropod/pkg/config"
 	"micropod/pkg/firecracker"
 	"micropod/pkg/image"
+	"micropod/pkg/metrics"
 	"micropod/pkg/network"
 	"micropod/pkg/rootfs"
 	"micropod/pkg/state"
+
+	"github.com/google/uuid"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/connectivity"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 type Manager struct {
-	config 			  *config.Config
+	config        *config.Config
 	store         *state.Store
 	imageService  image.ImageService
 	rootfsCreator *rootfs.Creator
+	metrics       *metrics.Metrics
 }
 
 type VMConfig struct {
@@ -57,14 +64,18 @@ func NewManager() *Manager {
 		store:         store,
 		imageService:  imageService,
 		rootfsCreator: rootfsCreator,
+		metrics:       metrics.NewMetrics(),
 	}
 }
 
 func (m *Manager) RunVM(imageName string, portMappings []string) (string, error) {
-	fmt.Printf("Starting VM for image: %s\n", imageName)
+	timer := metrics.NewTimer(fmt.Sprintf("RunVM(%s)", imageName))
+	defer timer.Stop()
 
 	vmID := uuid.New().String()
 	ctx := context.Background()
+
+	log.Printf("🚀 Starting VM for image: %s (ID: %s)", imageName, vmID)
 
 	// Setup network
 	netConfig, err := network.Setup(vmID, portMappings)
@@ -79,27 +90,33 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 		return "", fmt.Errorf("failed to pull image: %w", err)
 	}
 
-	// Create temporary directory for unpacking
-	tempDir := filepath.Join("/tmp", "micropod-unpack-"+vmID)
-	defer os.RemoveAll(tempDir)
-
-	// Unpack the image to the temporary directory
-	_, err = m.imageService.Unpack(ctx, imageName, tempDir)
+	// 1. Unpack image rootfs on the HOST (will be shared via virtio-fs)
+	unpackedPath := filepath.Join("/tmp", "micropod-rootfs-"+vmID)
+	_, err = m.imageService.Unpack(ctx, imageName, unpackedPath)
 	if err != nil {
 		network.Teardown(netConfig)
 		return "", fmt.Errorf("failed to unpack image: %w", err)
 	}
 
-	// Create ext4 rootfs from the unpacked directory
-	rootfsPath, err := m.rootfsCreator.CreateFromDir(tempDir, vmID)
-	if err != nil {
-		network.Teardown(netConfig)
-		return "", fmt.Errorf("failed to create rootfs: %w", err)
-	}
-
+	// 2. Setup VM configuration with virtio-fs and vsock
 	kernelPath := m.config.GetKernelPath()
+	agentRootfsPath := m.config.GetAgentRootfsPath()
 	socketPath := m.getSocketPath(vmID)
 	logFilePath := m.config.GetLogPath(vmID)
+	vsockPath := m.getVsockPath(vmID)
+
+	// Configure virtio-fs for sharing container rootfs
+	virtioFS := &firecracker.VirtioFSConfig{
+		SharedDir:  unpackedPath,
+		MountTag:   "container_rootfs",
+		SocketPath: filepath.Join("/tmp", "micropod-virtiofs-"+vmID),
+	}
+
+	// Configure vsock for agent communication
+	vsock := &firecracker.VsockConfig{
+		GuestCID: 3, // First VM gets CID 3
+		UDSPath:  vsockPath,
+	}
 
 	// Construct kernel boot args with network configuration
 	ipBootArg := fmt.Sprintf("ip=%s::%s:255.255.255.0::eth0:none", netConfig.GuestIP, netConfig.GatewayIP)
@@ -111,11 +128,47 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 		MemoryMB: 512,
 	}
 
-	if err := client.LaunchVM(kernelPath, rootfsPath, config.VCPUs, config.MemoryMB, ipBootArg, netConfig, logFilePath); err != nil {
+	// 3. Launch VM with agent rootfs + virtio-fs + vsock
+	if err := client.LaunchVM(kernelPath, agentRootfsPath, config.VCPUs, config.MemoryMB,
+		ipBootArg, virtioFS, vsock, netConfig, logFilePath); err != nil {
 		network.Teardown(netConfig)
-		m.rootfsCreator.RemoveRootfs(rootfsPath)
+		os.RemoveAll(unpackedPath)
 		return "", fmt.Errorf("failed to launch VM: %w", err)
 	}
+
+	// 4. Connect to Guest Agent via gRPC over vsock
+	conn, err := m.connectToAgent(ctx, vsockPath)
+	if err != nil {
+		network.Teardown(netConfig)
+		os.RemoveAll(unpackedPath)
+		return "", fmt.Errorf("failed to connect to agent: %w", err)
+	}
+	defer conn.Close()
+
+	agentClient := pb.NewAgentClient(conn)
+
+	// 5. Send CreateContainer RPC to agent
+	fmt.Println("Sending CreateContainer command to agent...")
+	req := &pb.CreateContainerRequest{
+		ContainerId: vmID,
+		ProcessArgs: []string{"/bin/sh"}, // Default shell for now - TODO: extract from image config
+		RootfsPath:  "/container_rootfs", // This is where virtio-fs mounts the shared dir
+	}
+
+	resp, err := agentClient.CreateContainer(ctx, req)
+	if err != nil {
+		network.Teardown(netConfig)
+		os.RemoveAll(unpackedPath)
+		return "", fmt.Errorf("CreateContainer RPC failed: %w", err)
+	}
+
+	if resp.Status != "RUNNING" {
+		network.Teardown(netConfig)
+		os.RemoveAll(unpackedPath)
+		return "", fmt.Errorf("container failed to start in guest: %s", resp.ErrorMessage)
+	}
+
+	fmt.Printf("Agent response: Container %s is RUNNING.\n", resp.ContainerId)
 
 	vm := state.VM{
 		ID:             vmID,
@@ -123,7 +176,9 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 		State:          "Running",
 		FirecrackerPid: client.GetPID(),
 		VMSocketPath:   socketPath,
-		RootfsPath:     rootfsPath,
+		UnpackedPath:   unpackedPath, // Store path to virtio-fs shared directory
+		VsockPath:      vsockPath,    // Store vsock socket path
+		AgentConnected: true,         // Agent successfully responded
 		KernelPath:     kernelPath,
 		Network:        netConfig,
 		LogFilePath:    logFilePath,
@@ -133,7 +188,7 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 	if err := m.store.AddVM(vm); err != nil {
 		client.Stop()
 		network.Teardown(netConfig)
-		m.rootfsCreator.RemoveRootfs(rootfsPath)
+		os.RemoveAll(unpackedPath)
 		return "", fmt.Errorf("failed to store VM state: %w", err)
 	}
 
@@ -142,7 +197,7 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 	fmt.Printf("  Image: %s\n", imageName)
 	fmt.Printf("  PID: %d\n", client.GetPID())
 	fmt.Printf("  Socket: %s\n", socketPath)
-	fmt.Printf("  Rootfs: %s\n", rootfsPath)
+	fmt.Printf("  Unpacked Path: %s\n", unpackedPath)
 	fmt.Printf("  Network: %s -> %s\n", netConfig.GuestIP, netConfig.TapDevice)
 
 	return vmID, nil
@@ -242,8 +297,9 @@ func (m *Manager) cleanup(vm *state.VM) error {
 		errors = append(errors, fmt.Errorf("failed to remove socket: %w", err))
 	}
 
-	if err := m.rootfsCreator.RemoveRootfs(vm.RootfsPath); err != nil {
-		errors = append(errors, fmt.Errorf("failed to remove rootfs: %w", err))
+	// Clean up unpacked container rootfs directory
+	if err := os.RemoveAll(vm.UnpackedPath); err != nil {
+		errors = append(errors, fmt.Errorf("failed to remove unpacked path: %w", err))
 	}
 
 	if len(errors) > 0 {
@@ -263,4 +319,98 @@ func (m *Manager) cleanupDeadVM(vm state.VM) {
 	if err := m.store.RemoveVM(vm.ID); err != nil {
 		fmt.Printf("Warning: failed to remove dead VM %s from state: %v\n", vm.ID, err)
 	}
+}
+
+// getVsockPath returns the vsock unix domain socket path for a VM
+func (m *Manager) getVsockPath(vmID string) string {
+	return filepath.Join("/tmp", "micropod-vsock-"+vmID)
+}
+
+// connectToAgent establishes a gRPC connection to the guest agent via vsock
+func (m *Manager) connectToAgent(ctx context.Context, vsockPath string) (*grpc.ClientConn, error) {
+
+	log.Printf("Attempting to connect to guest agent via vsock...")
+
+	const maxRetries = 30
+	const retryInterval = 1 * time.Second
+	const connectionTimeout = 5 * time.Second
+
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		log.Printf("Connection attempt %d/%d...", attempt, maxRetries)
+
+		// Create connection context with timeout
+		connCtx, cancel := context.WithTimeout(ctx, connectionTimeout)
+
+		// Attempt to establish gRPC connection using the new API
+		conn, err := grpc.NewClient(vsockPath,
+			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+				// Custom dialer for vsock connection
+				dialer := &net.Dialer{
+					Timeout: connectionTimeout,
+				}
+				return dialer.DialContext(ctx, "unix", addr)
+			}),
+		)
+
+		if err != nil {
+			cancel()
+			lastErr = err
+		} else {
+			// Test the connection by waiting for it to be ready
+			if !conn.WaitForStateChange(connCtx, connectivity.Idle) {
+				cancel()
+				conn.Close()
+				lastErr = fmt.Errorf("connection timeout")
+			} else {
+				cancel()
+				// Connection successful, test it
+				if err := m.testConnection(conn); err != nil {
+					conn.Close()
+					lastErr = fmt.Errorf("connection test failed: %w", err)
+					log.Printf("Connection test failed (attempt %d): %v", attempt, lastErr)
+				} else {
+					log.Printf("Successfully connected to guest agent on attempt %d", attempt)
+					return conn, nil
+				}
+			}
+		}
+
+		if attempt < maxRetries {
+			log.Printf("Connection failed (attempt %d): %v. Retrying in %v...", attempt, lastErr, retryInterval)
+
+			// Check if parent context is cancelled
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("connection cancelled: %w", ctx.Err())
+			case <-time.After(retryInterval):
+				// Continue to next attempt
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("failed to connect to agent after %d attempts, last error: %w", maxRetries, lastErr)
+}
+
+// testConnection performs a basic health check on the connection
+func (m *Manager) testConnection(conn *grpc.ClientConn) error {
+	// Create a context with short timeout for health check
+	_, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Test the connection state
+	state := conn.GetState()
+	if state != connectivity.Ready {
+		return fmt.Errorf("connection not ready, state: %v", state)
+	}
+
+	// Optionally, you can make a simple RPC call here to verify the agent is responding
+	// For example, if you have a health check service:
+	// client := pb.NewHealthServiceClient(conn)
+	// _, err := client.Check(ctx, &pb.HealthCheckRequest{})
+	// return err
+
+	return nil
 }

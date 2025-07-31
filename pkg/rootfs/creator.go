@@ -19,7 +19,7 @@ func NewCreator(rootfsdir string) (*Creator, error) {
 	if err := os.MkdirAll(mountDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create mount directory: %w", err)
 	}
-	
+
 	return &Creator{
 		rootfsDir: rootfsdir,
 		mountDir:  mountDir,
@@ -29,45 +29,45 @@ func NewCreator(rootfsdir string) (*Creator, error) {
 func (c *Creator) Create(tarPath, vmID string) (string, error) {
 	ext4Path := filepath.Join(c.rootfsDir, fmt.Sprintf("%s.ext4", vmID))
 	mountPoint := filepath.Join(c.mountDir, vmID)
-	
+
 	defer func() {
 		c.unmount(mountPoint)
 		c.removeMount(mountPoint)
 	}()
-	
+
 	if err := c.checkSudoAvailable(); err != nil {
 		return "", fmt.Errorf("sudo access required: %w", err)
 	}
-	
+
 	if err := c.createSparseFile(ext4Path); err != nil {
 		return "", fmt.Errorf("failed to create sparse file: %w", err)
 	}
-	
+
 	if err := c.formatExt4(ext4Path); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to format ext4: %w", err)
 	}
-	
+
 	if err := c.createMountPoint(mountPoint); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to create mount point: %w", err)
 	}
-	
+
 	if err := c.mount(ext4Path, mountPoint); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to mount: %w", err)
 	}
-	
+
 	if err := c.extractTar(tarPath, mountPoint); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to extract tar: %w", err)
 	}
-	
+
 	if err := c.unmount(mountPoint); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to unmount: %w", err)
 	}
-	
+
 	return ext4Path, nil
 }
 
@@ -75,45 +75,45 @@ func (c *Creator) Create(tarPath, vmID string) (string, error) {
 func (c *Creator) CreateFromDir(sourceDir, vmID string) (string, error) {
 	ext4Path := filepath.Join(c.rootfsDir, fmt.Sprintf("%s.ext4", vmID))
 	mountPoint := filepath.Join(c.mountDir, vmID)
-	
+
 	defer func() {
 		c.unmount(mountPoint)
 		c.removeMount(mountPoint)
 	}()
-	
+
 	if err := c.checkSudoAvailable(); err != nil {
 		return "", fmt.Errorf("sudo access required: %w", err)
 	}
-	
+
 	if err := c.createSparseFile(ext4Path); err != nil {
 		return "", fmt.Errorf("failed to create sparse file: %w", err)
 	}
-	
+
 	if err := c.formatExt4(ext4Path); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to format ext4: %w", err)
 	}
-	
+
 	if err := c.createMountPoint(mountPoint); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to create mount point: %w", err)
 	}
-	
+
 	if err := c.mount(ext4Path, mountPoint); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to mount: %w", err)
 	}
-	
+
 	if err := c.copyDir(sourceDir, mountPoint); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to copy directory: %w", err)
 	}
-	
+
 	if err := c.unmount(mountPoint); err != nil {
 		c.cleanup(ext4Path)
 		return "", fmt.Errorf("failed to unmount: %w", err)
 	}
-	
+
 	return ext4Path, nil
 }
 
@@ -127,26 +127,26 @@ func (c *Creator) checkSudoAvailable() error {
 
 func (c *Creator) createSparseFile(ext4Path string) error {
 	fmt.Printf("Creating sparse file: %s\n", ext4Path)
-	
+
 	cmd := exec.Command("dd", "if=/dev/zero", "of="+ext4Path, "bs=1M", "count=0", "seek=2048")
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create sparse file with dd: %w", err)
 	}
-	
+
 	return nil
 }
 
 func (c *Creator) formatExt4(ext4Path string) error {
 	fmt.Printf("Formatting ext4 filesystem: %s\n", ext4Path)
-	
+
 	cmd := exec.Command("sudo", "mkfs.ext4", "-F", ext4Path)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to format ext4: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -159,40 +159,40 @@ func (c *Creator) createMountPoint(mountPoint string) error {
 
 func (c *Creator) mount(ext4Path, mountPoint string) error {
 	fmt.Printf("Mounting %s to %s\n", ext4Path, mountPoint)
-	
+
 	cmd := exec.Command("sudo", "mount", "-o", "loop", ext4Path, mountPoint)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to mount ext4 file: %w", err)
 	}
-	
+
 	return nil
 }
 
 func (c *Creator) extractTar(tarPath, mountPoint string) error {
 	fmt.Printf("Extracting tar %s to %s\n", tarPath, mountPoint)
-	
+
 	cmd := exec.Command("sudo", "tar", "-xf", tarPath, "-C", mountPoint)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to extract tar: %w", err)
 	}
-	
+
 	return nil
 }
 
 func (c *Creator) copyDir(sourceDir, mountPoint string) error {
 	fmt.Printf("Copying directory %s to %s\n", sourceDir, mountPoint)
-	
+
 	cmd := exec.Command("sudo", "cp", "-a", sourceDir+"/.", mountPoint)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	
+
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to copy directory: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -214,7 +214,7 @@ func (c *Creator) isMounted(mountPoint string) bool {
 	if err != nil {
 		return false
 	}
-	
+
 	return strings.Contains(string(output), mountPoint)
 }
 
@@ -244,7 +244,7 @@ func (c *Creator) GetSizeGB(ext4Path string) (float64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to stat ext4 file: %w", err)
 	}
-	
+
 	sizeGB := float64(info.Size()) / (1024 * 1024 * 1024)
 	return sizeGB, nil
 }

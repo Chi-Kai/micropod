@@ -8,13 +8,13 @@ import (
 )
 
 type Config struct {
-	VMID         string          `json:"vmId"`
-	TapDevice    string          `json:"tapDevice"`
-	GuestIP      string          `json:"guestIp"`
-	GatewayIP    string          `json:"gatewayIp"`
-	Mask         string          `json:"mask"`
-	GuestMAC     string          `json:"guestMac"`
-	PortMappings map[int]int     `json:"portMappings"`
+	VMID         string      `json:"vmId"`
+	TapDevice    string      `json:"tapDevice"`
+	GuestIP      string      `json:"guestIp"`
+	GatewayIP    string      `json:"gatewayIp"`
+	Mask         string      `json:"mask"`
+	GuestMAC     string      `json:"guestMac"`
+	PortMappings map[int]int `json:"portMappings"`
 }
 
 func Setup(vmID string, portMappings []string) (*Config, error) {
@@ -26,7 +26,7 @@ func Setup(vmID string, portMappings []string) (*Config, error) {
 	}
 
 	// Generate IP addresses (simple static allocation)
-	vmIndex := hashVMID(vmID) % 254 + 1 // VM index 1-254
+	vmIndex := hashVMID(vmID)%254 + 1 // VM index 1-254
 	config.GuestIP = fmt.Sprintf("172.18.%d.2", vmIndex)
 	config.GatewayIP = fmt.Sprintf("172.18.%d.1", vmIndex)
 
@@ -74,7 +74,7 @@ func Teardown(config *Config) error {
 
 func parsePortMappings(mappings []string) (map[int]int, error) {
 	result := make(map[int]int)
-	
+
 	for _, mapping := range mappings {
 		parts := strings.Split(mapping, ":")
 		if len(parts) != 2 {

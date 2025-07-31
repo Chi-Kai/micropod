@@ -45,6 +45,17 @@ type NetworkInterface struct {
 	GuestMAC    string `json:"guest_mac"`
 }
 
+type VirtioFSConfig struct {
+	SharedDir  string `json:"shared_dir"`
+	MountTag   string `json:"mount_tag"`
+	SocketPath string `json:"socket_path"`
+}
+
+type VsockConfig struct {
+	GuestCID uint32 `json:"guest_cid"`
+	UDSPath  string `json:"uds_path"`
+}
+
 type Action struct {
 	ActionType string `json:"action_type"`
 }
@@ -63,7 +74,10 @@ func NewClient(socketPath string) *Client {
 	}
 }
 
-func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int, bootArgs string, netConfig *network.Config, logPath string) error {
+// LaunchVMWithAgent launches a VM with agent support (vsock and virtio-fs)
+func (c *Client) LaunchVM(kernelPath, agentRootfsPath string, vcpus int, memoryMB int, bootArgs string,
+	virtioFS *VirtioFSConfig, vsock *VsockConfig, netConfig *network.Config, logPath string) error {
+
 	if err := c.startFirecrackerProcess(logPath); err != nil {
 		return fmt.Errorf("failed to start firecracker process: %w", err)
 	}
@@ -78,7 +92,7 @@ func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int
 		return fmt.Errorf("failed to configure boot source: %w", err)
 	}
 
-	if err := c.configureDrive(rootfsPath); err != nil {
+	if err := c.configureDrive(agentRootfsPath); err != nil {
 		c.killProcess()
 		return fmt.Errorf("failed to configure drive: %w", err)
 	}
@@ -86,6 +100,20 @@ func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int
 	if err := c.configureMachine(vcpus, memoryMB); err != nil {
 		c.killProcess()
 		return fmt.Errorf("failed to configure machine: %w", err)
+	}
+
+	if vsock != nil {
+		if err := c.configureVsock(vsock); err != nil {
+			c.killProcess()
+			return fmt.Errorf("failed to configure vsock: %w", err)
+		}
+	}
+
+	if virtioFS != nil {
+		if err := c.configureVirtioFS(virtioFS); err != nil {
+			c.killProcess()
+			return fmt.Errorf("failed to configure virtio-fs: %w", err)
+		}
 	}
 
 	if netConfig != nil {
@@ -288,4 +316,25 @@ func (c *Client) IsRunning() bool {
 	}
 
 	return true
+}
+
+// configureVsock configures vsock for guest-host communication
+func (c *Client) configureVsock(vsock *VsockConfig) error {
+	vsockDevice := map[string]interface{}{
+		"guest_cid": vsock.GuestCID,
+		"uds_path":  vsock.UDSPath,
+	}
+
+	return c.makeAPIRequest("PUT", "/vsock", vsockDevice)
+}
+
+// configureVirtioFS configures virtio-fs for filesystem sharing
+func (c *Client) configureVirtioFS(virtioFS *VirtioFSConfig) error {
+	fsDevice := map[string]interface{}{
+		"fs_id":     "rootfs_share",
+		"host_path": virtioFS.SharedDir,
+		"tag":       virtioFS.MountTag,
+	}
+
+	return c.makeAPIRequest("PUT", "/fs/rootfs_share", fsDevice)
 }

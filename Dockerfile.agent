@@ -1,0 +1,31 @@
+# Dockerfile.agent
+# Alternative approach to build agent rootfs using Docker
+
+FROM alpine:3.18
+
+# Install runc and basic tools
+RUN apk add --no-cache \
+    runc \
+    util-linux \
+    && rm -rf /var/cache/apk/*
+
+# Create necessary directories
+RUN mkdir -p /containers \
+    && mkdir -p /proc \
+    && mkdir -p /sys \
+    && mkdir -p /dev \
+    && mkdir -p /tmp \
+    && mkdir -p /var/log
+
+# Copy the agent binary as init
+COPY bin/agent /sbin/init
+RUN chmod +x /sbin/init
+
+# Create basic device nodes
+RUN mknod /dev/null c 1 3 && \
+    mknod /dev/zero c 1 5 && \
+    mknod /dev/random c 1 8 && \
+    mknod /dev/urandom c 1 9 || true
+
+# Agent will run as PID 1
+CMD ["/sbin/init"]

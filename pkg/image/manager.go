@@ -105,7 +105,7 @@ func (m *Manager) PullImage(ctx context.Context, refString string) (Image, error
 // GetImage retrieves image information from local storage.
 func (m *Manager) GetImage(ctx context.Context, refString string) (Image, error) {
 	layoutPath := m.getLayoutPath(refString)
-	
+
 	// Check if layout exists
 	if _, err := os.Stat(layoutPath); os.IsNotExist(err) {
 		return nil, fmt.Errorf("image %s not found locally", refString)
@@ -212,11 +212,11 @@ func (m *Manager) Unpack(ctx context.Context, refString string, destPath string)
 // DeleteImage removes an image from local storage.
 func (m *Manager) DeleteImage(ctx context.Context, refString string) error {
 	layoutPath := m.getLayoutPath(refString)
-	
+
 	if err := os.RemoveAll(layoutPath); err != nil {
 		return fmt.Errorf("failed to remove image directory: %w", err)
 	}
-	
+
 	return nil
 }
 
@@ -272,7 +272,7 @@ func (m *Manager) extractLayer(layer v1.Layer, destPath string) error {
 		}
 
 		target := filepath.Join(destPath, header.Name)
-		
+
 		// Ensure the target is within destPath (security check)
 		if !strings.HasPrefix(target, filepath.Clean(destPath)+string(os.PathSeparator)) {
 			continue

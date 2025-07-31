@@ -26,7 +26,7 @@ func TestManager_PullImage(t *testing.T) {
 	t.Run("pull small image", func(t *testing.T) {
 		// Test with a very small image (hello-world is typically ~20KB)
 		imageName := "hello-world:latest"
-		
+
 		img, err := manager.PullImage(ctx, imageName)
 		if err != nil {
 			t.Fatalf("Failed to pull image: %v", err)
@@ -47,7 +47,7 @@ func TestManager_PullImage(t *testing.T) {
 
 	t.Run("get existing image", func(t *testing.T) {
 		imageName := "hello-world:latest"
-		
+
 		img, err := manager.GetImage(ctx, imageName)
 		if err != nil {
 			t.Fatalf("Failed to get image: %v", err)
@@ -61,7 +61,7 @@ func TestManager_PullImage(t *testing.T) {
 	t.Run("unpack image", func(t *testing.T) {
 		imageName := "hello-world:latest"
 		unpackDir := filepath.Join(tempDir, "unpack")
-		
+
 		rootfsPath, err := manager.Unpack(ctx, imageName, unpackDir)
 		if err != nil {
 			t.Fatalf("Failed to unpack image: %v", err)

@@ -7,8 +7,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/spf13/cobra"
 	"micropod/pkg/manager"
+	"micropod/pkg/metrics"
+
+	"github.com/spf13/cobra"
 )
 
 var rootCmd = &cobra.Command{
@@ -25,13 +27,13 @@ var runCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		imageName := args[0]
-		
+
 		mgr := manager.NewManager()
 		vmID, err := mgr.RunVM(imageName, portMappings)
 		if err != nil {
 			return fmt.Errorf("failed to run VM: %w", err)
 		}
-		
+
 		fmt.Printf("VM started successfully with ID: %s\n", vmID)
 		return nil
 	},
@@ -46,19 +48,19 @@ var listCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to list VMs: %w", err)
 		}
-		
+
 		if len(vms) == 0 {
 			fmt.Println("No running VMs found")
 			return nil
 		}
-		
+
 		fmt.Printf("%-36s %-20s %-10s %-10s %s\n", "VM ID", "IMAGE", "STATE", "PID", "CREATED")
 		fmt.Println("------------------------------------------------------------------------------------")
 		for _, vm := range vms {
-			fmt.Printf("%-36s %-20s %-10s %-10d %s\n", 
+			fmt.Printf("%-36s %-20s %-10s %-10d %s\n",
 				vm.ID, vm.ImageName, vm.State, vm.FirecrackerPid, vm.CreatedAt.Format("2006-01-02 15:04:05"))
 		}
-		
+
 		return nil
 	},
 }
@@ -69,13 +71,13 @@ var stopCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		vmID := args[0]
-		
+
 		mgr := manager.NewManager()
 		err := mgr.StopVM(vmID)
 		if err != nil {
 			return fmt.Errorf("failed to stop VM: %w", err)
 		}
-		
+
 		fmt.Printf("VM %s stopped successfully\n", vmID)
 		return nil
 	},
@@ -89,7 +91,7 @@ var logsCmd = &cobra.Command{
 		vmID := args[0]
 
 		mgr := manager.NewManager()
-		
+
 		// Get VM from state store to find log file path
 		vms, err := mgr.ListVMs()
 		if err != nil {
@@ -143,6 +145,9 @@ func init() {
 }
 
 func main() {
+	// Show startup banner for better user experience
+	metrics.LogStartupBanner()
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)

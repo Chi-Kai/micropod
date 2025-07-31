@@ -21,12 +21,12 @@ func getConfigDir() string {
 	if configDir := os.Getenv("MICROPOD_CONFIG_DIR"); configDir != "" {
 		return configDir
 	}
-	
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "/tmp/micropod"
 	}
-	
+
 	return filepath.Join(homeDir, ".config", "micropod")
 }
 
@@ -81,7 +81,7 @@ func (c *Config) GetLogsDir() string {
 
 func (c *Config) GetLogPath(vmID string) string {
 	logPath := filepath.Join(c.GetLogsDir(), vmID+".log")
-	
+
 	// Create empty console log file if it doesn't exist (this is where VM output goes)
 	if _, err := os.Stat(logPath); os.IsNotExist(err) {
 		file, err := os.Create(logPath)
@@ -95,4 +95,8 @@ func (c *Config) GetLogPath(vmID string) string {
 
 func (c *Config) EnsureConfigDir() error {
 	return os.MkdirAll(c.ConfigDir, 0755)
+}
+
+func (c *Config) GetAgentRootfsPath() string {
+	return filepath.Join(c.ConfigDir, "agent-rootfs.ext4")
 }

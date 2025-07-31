@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package api;
+
+option go_package = "micropod/pkg/agent/api";
+
+// The Agent service defines the RPCs the guest agent will expose.
+service Agent {
+  // Creates and starts a new container inside the VM.
+  rpc CreateContainer(CreateContainerRequest) returns (CreateContainerResponse);
+  
+  // Future RPCs for enhanced functionality
+  // rpc StopContainer(StopContainerRequest) returns (StopContainerResponse);
+  // rpc ExecInContainer(ExecInContainerRequest) returns (stream ExecInContainerResponse);
+  // rpc GetContainerLogs(GetContainerLogsRequest) returns (stream LogEntry);
+}
+
+message CreateContainerRequest {
+  string container_id = 1;
+  // OCI bundle spec, including entrypoint, cmd, env vars, etc.
+  // For simplicity, we'll start with just the basics.
+  repeated string process_args = 2;
+  // The path inside the VM where virtio-fs shares the rootfs.
+  string rootfs_path = 3; 
+}
+
+message CreateContainerResponse {
+  string container_id = 1;
+  uint32 pid = 2;
+  string status = 3; // e.g., "RUNNING", "FAILED"
+  string error_message = 4;
+}
