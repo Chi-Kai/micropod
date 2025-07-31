@@ -41,7 +41,10 @@ func (c *Config) GetKernelPath() string {
 func (c *Config) GetStateFilePath() string {
 	stateFilePath := filepath.Join(c.ConfigDir, "vms.json")
 	if _, err := os.Stat(stateFilePath); os.IsNotExist(err) {
-		log.Fatalf("State file not found at %s. Please create a valid state file.", stateFilePath)
+		// create a new state file
+		if _, err := os.Create(stateFilePath); err != nil {
+			log.Fatalf("Failed to create new state file: %v", err)
+		}
 	}
 	return stateFilePath
 }
