@@ -107,9 +107,8 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 
 	// Configure virtio-fs for sharing container rootfs
 	virtioFS := &firecracker.VirtioFSConfig{
-		SharedDir:  unpackedPath,
-		MountTag:   "container_rootfs",
-		SocketPath: filepath.Join("/tmp", "micropod-virtiofs-"+vmID),
+		SharedDir: unpackedPath,
+		MountTag:  "container_rootfs",
 	}
 
 	// Configure vsock for agent communication
@@ -121,7 +120,7 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 	// Construct kernel boot args with network configuration
 	ipBootArg := fmt.Sprintf("ip=%s::%s:255.255.255.0::eth0:none", netConfig.GuestIP, netConfig.GatewayIP)
 
-	client := firecracker.NewClient(socketPath)
+	client := firecracker.NewClient()
 
 	config := VMConfig{
 		VCPUs:    1,
@@ -129,8 +128,20 @@ func (m *Manager) RunVM(imageName string, portMappings []string) (string, error)
 	}
 
 	// 3. Launch VM with agent rootfs + virtio-fs + vsock
-	if err := client.LaunchVM(kernelPath, agentRootfsPath, config.VCPUs, config.MemoryMB,
-		ipBootArg, virtioFS, vsock, netConfig, logFilePath); err != nil {
+	launchConfig := firecracker.LaunchConfig{
+		KernelPath: kernelPath,
+		RootfsPath: agentRootfsPath,
+		VCPUs:      int64(config.VCPUs),
+		MemoryMB:   int64(config.MemoryMB),
+		BootArgs:   ipBootArg,
+		VirtioFS:   virtioFS,
+		Vsock:      vsock,
+		Network:    netConfig,
+		SocketPath: socketPath,
+		LogPath:    logFilePath,
+	}
+
+	if err := client.LaunchVM(launchConfig); err != nil {
 		network.Teardown(netConfig)
 		os.RemoveAll(unpackedPath)
 		return "", fmt.Errorf("failed to launch VM: %w", err)
