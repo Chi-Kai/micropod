@@ -31,7 +31,7 @@ func getConfigDir() string {
 }
 
 func (c *Config) GetKernelPath() string {
-	kernelPath := filepath.Join(c.ConfigDir, "vmlinux", "vmlinux.elf")
+	kernelPath := filepath.Join(c.ConfigDir, "vmlinux", "vmlinux.bin")
 	if _, err := os.Stat(kernelPath); os.IsNotExist(err) {
 		log.Fatalf("Kernel file not found at %s. Please download a compatible kernel.", kernelPath)
 	}

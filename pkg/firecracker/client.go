@@ -1,251 +1,197 @@
 package firecracker
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
-	"net"
-	"net/http"
 	"os"
 	"os/exec"
-	"syscall"
-	"time"
+
+	firecracker "github.com/firecracker-microvm/firecracker-go-sdk"
+	"github.com/firecracker-microvm/firecracker-go-sdk/client/models"
+	"github.com/sirupsen/logrus"
 )
 
+// LaunchConfig 启动配置
+type LaunchConfig struct {
+	KernelPath   string
+	RootfsPath   string
+	VCPUs        int64
+	MemoryMB     int64
+	BootArgs     string
+	SocketPath   string
+	LogPath      string
+}
+
+// Client Firecracker 客户端
 type Client struct {
-	socketPath string
-	httpClient *http.Client
-	process    *os.Process
+	machine *firecracker.Machine
+	config  firecracker.Config
+	ctx     context.Context
+	cancel  context.CancelFunc
+	logger  *logrus.Entry
 }
 
-type BootSource struct {
-	KernelImagePath string `json:"kernel_image_path"`
-	BootArgs        string `json:"boot_args"`
-}
-
-type Drive struct {
-	DriveID      string `json:"drive_id"`
-	PathOnHost   string `json:"path_on_host"`
-	IsReadOnly   bool   `json:"is_read_only"`
-	IsRootDevice bool   `json:"is_root_device"`
-}
-
-type MachineConfig struct {
-	VcpuCount  int `json:"vcpu_count"`
-	MemSizeMib int `json:"mem_size_mib"`
-}
-
-type Action struct {
-	ActionType string `json:"action_type"`
-}
-
+// NewClient 创建新的 Firecracker 客户端
 func NewClient(socketPath string) *Client {
+	ctx, cancel := context.WithCancel(context.Background())
+	logger := logrus.WithField("component", "firecracker")
+
 	return &Client{
-		socketPath: socketPath,
-		httpClient: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-					return net.Dial("unix", socketPath)
-				},
-			},
-			Timeout: 30 * time.Second,
+		ctx:    ctx,
+		cancel: cancel,
+		logger: logger,
+		config: firecracker.Config{
+			SocketPath: socketPath,
 		},
 	}
 }
 
-func (c *Client) LaunchVM(kernelPath, rootfsPath string, vcpus int, memoryMB int) error {
-	if err := c.startFirecrackerProcess(); err != nil {
-		return fmt.Errorf("failed to start firecracker process: %w", err)
+// Launch 启动虚拟机
+func (c *Client) Launch(config LaunchConfig) error {
+	// 1. 构建 Firecracker 配置
+	fcConfig, err := c.buildConfig(config)
+	if err != nil {
+		return fmt.Errorf("failed to build config: %w", err)
+	}
+	c.config = fcConfig
+
+	// 2. 设置机器选项
+	opts := []firecracker.Opt{
+		firecracker.WithLogger(c.logger),
 	}
 
-	if err := c.waitForSocket(); err != nil {
-		c.killProcess()
-		return fmt.Errorf("failed to wait for socket: %w", err)
+	// 3. 配置进程运行器
+	firecrackerBinary, err := exec.LookPath("firecracker")
+	if err != nil {
+		return fmt.Errorf("firecracker binary not found: %w", err)
 	}
 
-	if err := c.configureBootSource(kernelPath); err != nil {
-		c.killProcess()
-		return fmt.Errorf("failed to configure boot source: %w", err)
-	}
-
-	if err := c.configureDrive(rootfsPath); err != nil {
-		c.killProcess()
-		return fmt.Errorf("failed to configure drive: %w", err)
-	}
-
-	if err := c.configureMachine(vcpus, memoryMB); err != nil {
-		c.killProcess()
-		return fmt.Errorf("failed to configure machine: %w", err)
-	}
-
-	if err := c.startInstance(); err != nil {
-		c.killProcess()
-		return fmt.Errorf("failed to start instance: %w", err)
-	}
-
-	return nil
-}
-
-func (c *Client) startFirecrackerProcess() error {
-	if err := c.checkFirecrackerBinary(); err != nil {
-		return err
-	}
-
-	if err := c.removeSocketFile(); err != nil {
-		return err
-	}
-
-	fmt.Printf("Starting firecracker process with socket: %s\n", c.socketPath)
-
-	cmd := exec.Command("firecracker", "--api-sock", c.socketPath)
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setpgid: true,
-	}
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("failed to start firecracker: %w", err)
-	}
-
-	c.process = cmd.Process
-
-	go func() {
-		cmd.Wait()
-	}()
-
-	return nil
-}
-
-func (c *Client) checkFirecrackerBinary() error {
-	cmd := exec.Command("firecracker", "--version")
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("firecracker binary not available in PATH: %w", err)
-	}
-	return nil
-}
-
-func (c *Client) removeSocketFile() error {
-	if err := os.Remove(c.socketPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("failed to remove existing socket: %w", err)
-	}
-	return nil
-}
-
-func (c *Client) waitForSocket() error {
-	timeout := time.Now().Add(10 * time.Second)
-
-	for time.Now().Before(timeout) {
-		if _, err := os.Stat(c.socketPath); err == nil {
-			return nil
+	// 设置日志输出
+	stdout := os.Stdout
+	stderr := os.Stderr
+	if config.LogPath != "" {
+		logFile, err := os.OpenFile(config.LogPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("failed to open log file: %w", err)
 		}
-		time.Sleep(100 * time.Millisecond)
+		stdout = logFile
+		stderr = logFile
 	}
 
-	return fmt.Errorf("timeout waiting for socket %s", c.socketPath)
-}
+	cmd := firecracker.VMCommandBuilder{}.
+		WithBin(firecrackerBinary).
+		WithSocketPath(fcConfig.SocketPath).
+		WithStdin(os.Stdin).
+		WithStdout(stdout).
+		WithStderr(stderr).
+		Build(c.ctx)
 
-func (c *Client) configureBootSource(kernelPath string) error {
-	bootSource := BootSource{
-		KernelImagePath: kernelPath,
-		BootArgs:        "console=ttyS0 reboot=k panic=1 pci=off root=/dev/vda rw",
-	}
+	opts = append(opts, firecracker.WithProcessRunner(cmd))
 
-	return c.makeAPIRequest("PUT", "/boot-source", bootSource)
-}
-
-func (c *Client) configureDrive(rootfsPath string) error {
-	drive := Drive{
-		DriveID:      "vda",
-		PathOnHost:   rootfsPath,
-		IsReadOnly:   false,
-		IsRootDevice: true,
-	}
-
-	return c.makeAPIRequest("PUT", "/drives/vda", drive)
-}
-
-func (c *Client) configureMachine(vcpus int, memoryMB int) error {
-	machineConfig := MachineConfig{
-		VcpuCount:  vcpus,
-		MemSizeMib: memoryMB,
-	}
-
-	return c.makeAPIRequest("PUT", "/machine-config", machineConfig)
-}
-
-func (c *Client) startInstance() error {
-	action := Action{
-		ActionType: "InstanceStart",
-	}
-
-	return c.makeAPIRequest("PUT", "/actions", action)
-}
-
-func (c *Client) makeAPIRequest(method, path string, body interface{}) error {
-	jsonBody, err := json.Marshal(body)
+	// 4. 创建并启动机器
+	c.machine, err = firecracker.NewMachine(c.ctx, fcConfig, opts...)
 	if err != nil {
-		return fmt.Errorf("failed to marshal request body: %w", err)
+		return fmt.Errorf("failed to create machine: %w", err)
 	}
 
-	req, err := http.NewRequest(method, "http://localhost"+path, bytes.NewBuffer(jsonBody))
-	if err != nil {
-		return fmt.Errorf("failed to create request: %w", err)
+	if err := c.machine.Start(c.ctx); err != nil {
+		return fmt.Errorf("failed to start machine: %w", err)
 	}
 
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("failed to make API request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-	}
-
+	c.logger.Info("Firecracker VM started successfully")
 	return nil
 }
 
+// buildConfig 构建 Firecracker 配置
+func (c *Client) buildConfig(config LaunchConfig) (firecracker.Config, error) {
+	// 构建驱动器
+	drives := []models.Drive{
+		{
+			DriveID:      firecracker.String("rootfs"),
+			PathOnHost:   firecracker.String(config.RootfsPath),
+			IsReadOnly:   firecracker.Bool(false),
+			IsRootDevice: firecracker.Bool(true),
+		},
+	}
+
+	// 构建机器配置
+	machineConfig := models.MachineConfiguration{
+		VcpuCount:  firecracker.Int64(config.VCPUs),
+		MemSizeMib: firecracker.Int64(config.MemoryMB),
+		Smt:        firecracker.Bool(false), // 禁用 SMT
+	}
+
+	bootArgs := config.BootArgs
+	if bootArgs == "" {
+		bootArgs = "console=ttyS0 reboot=k panic=1 pci=off"
+	}
+
+	return firecracker.Config{
+		SocketPath:      config.SocketPath,
+		KernelImagePath: config.KernelPath,
+		KernelArgs:      bootArgs,
+		Drives:          drives,
+		MachineCfg:      machineConfig,
+		LogLevel:        "Debug",
+	}, nil
+}
+
+// Stop 停止虚拟机
+func (c *Client) Stop() error {
+	if c.machine == nil {
+		return nil
+	}
+
+	c.logger.Info("Stopping Firecracker VM...")
+
+	// 优雅关闭，失败则强制停止
+	if err := c.machine.Shutdown(c.ctx); err != nil {
+		c.logger.WithError(err).Warn("Graceful shutdown failed, forcing stop")
+		if stopErr := c.machine.StopVMM(); stopErr != nil {
+			return fmt.Errorf("failed to stop VMM: %w", stopErr)
+		}
+	}
+
+	c.cancel()
+	return nil
+}
+
+// GetPID 获取进程 PID
 func (c *Client) GetPID() int {
-	if c.process == nil {
+	if c.machine == nil {
 		return 0
 	}
-	return c.process.Pid
+	pid, err := c.machine.PID()
+	if err != nil {
+		return 0
+	}
+	return pid
 }
 
-func (c *Client) Stop() error {
-	if c.process != nil {
-		if err := c.process.Kill(); err != nil {
-			return fmt.Errorf("failed to kill process: %w", err)
-		}
-		c.process.Wait()
-	}
-
-	if err := c.removeSocketFile(); err != nil {
-		fmt.Printf("Warning: failed to remove socket file: %v\n", err)
-	}
-
-	return nil
-}
-
-func (c *Client) killProcess() {
-	if c.process != nil {
-		c.process.Kill()
-		c.process.Wait()
-	}
-}
-
+// IsRunning 检查虚拟机是否运行中
 func (c *Client) IsRunning() bool {
-	if c.process == nil {
+	if c.machine == nil {
 		return false
 	}
-
-	if err := c.process.Signal(syscall.Signal(0)); err != nil {
+	pid, err := c.machine.PID()
+	if err != nil {
 		return false
 	}
+	return pid > 0
+}
 
-	return true
+// Wait 等待 VM 结束
+func (c *Client) Wait() error {
+	if c.machine == nil {
+		return fmt.Errorf("machine not initialized")
+	}
+	return c.machine.Wait(c.ctx)
+}
+
+// SetMetadata 设置元数据
+func (c *Client) SetMetadata(metadata interface{}) error {
+	if c.machine == nil {
+		return fmt.Errorf("machine not initialized")
+	}
+	return c.machine.SetMetadata(c.ctx, metadata)
 }

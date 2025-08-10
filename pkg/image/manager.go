@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -312,4 +313,137 @@ func (m *Manager) extractLayer(layer v1.Layer, destPath string) error {
 	}
 
 	return nil
+}
+
+// CreateBaseImage creates a base ext4 image file from a flattened directory
+func (m *Manager) CreateBaseImage(ctx context.Context, refString string) (string, error) {
+	// First unpack to a temporary directory
+	tempDir := filepath.Join(m.imageDir, "temp", sanitizeRef(refString))
+	if err := os.MkdirAll(tempDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+	
+	// Unpack image layers to temporary directory
+	_, err := m.Unpack(ctx, refString, tempDir)
+	if err != nil {
+		return "", fmt.Errorf("failed to unpack image: %w", err)
+	}
+	
+	// Create base image path
+	baseImagePath := filepath.Join(m.imageDir, "base", fmt.Sprintf("%s.ext4", sanitizeRef(refString)))
+	if err := os.MkdirAll(filepath.Dir(baseImagePath), 0755); err != nil {
+		return "", fmt.Errorf("failed to create base image directory: %w", err)
+	}
+	
+	// Check if base image already exists
+	if _, err := os.Stat(baseImagePath); err == nil {
+		return baseImagePath, nil
+	}
+	
+	// Create base image file from directory
+	if err := m.createBaseImageFromDir(tempDir, baseImagePath); err != nil {
+		return "", fmt.Errorf("failed to create base image: %w", err)
+	}
+	
+	return baseImagePath, nil
+}
+
+// createBaseImageFromDir creates an ext4 image file from a directory
+func (m *Manager) createBaseImageFromDir(sourceDir, targetPath string) error {
+	// Calculate directory size
+	size, err := m.calculateDirSize(sourceDir)
+	if err != nil {
+		return fmt.Errorf("failed to calculate directory size: %w", err)
+	}
+	
+	// Add 20% padding for filesystem overhead
+	size = size * 12 / 10
+	sizeMB := size / (1024 * 1024)
+	if sizeMB < 64 {
+		sizeMB = 64 // Minimum size
+	}
+	
+	// Create sparse file
+	if err := m.createSparseFile(targetPath, sizeMB); err != nil {
+		return fmt.Errorf("failed to create sparse file: %w", err)
+	}
+	
+	// Format as ext4
+	if err := m.formatExt4(targetPath); err != nil {
+		os.Remove(targetPath)
+		return fmt.Errorf("failed to format ext4: %w", err)
+	}
+	
+	// Mount and copy data
+	if err := m.populateImage(targetPath, sourceDir); err != nil {
+		os.Remove(targetPath)
+		return fmt.Errorf("failed to populate image: %w", err)
+	}
+	
+	return nil
+}
+
+// calculateDirSize calculates the total size of a directory
+func (m *Manager) calculateDirSize(dir string) (int64, error) {
+	var totalSize int64
+	
+	err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			totalSize += info.Size()
+		}
+		return nil
+	})
+	
+	return totalSize, err
+}
+
+// createSparseFile creates a sparse file of specified size in MB
+func (m *Manager) createSparseFile(path string, sizeMB int64) error {
+	cmd := exec.Command("dd", "if=/dev/zero", "of="+path, "bs=1M", "count=0", fmt.Sprintf("seek=%d", sizeMB))
+	return cmd.Run()
+}
+
+// formatExt4 formats a file as ext4 filesystem
+func (m *Manager) formatExt4(path string) error {
+	cmd := exec.Command("sudo", "mkfs.ext4", "-F", path)
+	return cmd.Run()
+}
+
+// populateImage mounts the image file and copies data from source directory
+func (m *Manager) populateImage(imagePath, sourceDir string) error {
+	// Create temporary mount point
+	mountPoint := filepath.Join("/tmp", "micropod-mount-"+filepath.Base(imagePath))
+	if err := os.MkdirAll(mountPoint, 0755); err != nil {
+		return fmt.Errorf("failed to create mount point: %w", err)
+	}
+	defer os.RemoveAll(mountPoint)
+	
+	// Mount the image
+	mountCmd := exec.Command("sudo", "mount", "-o", "loop", imagePath, mountPoint)
+	if err := mountCmd.Run(); err != nil {
+		return fmt.Errorf("failed to mount image: %w", err)
+	}
+	defer func() {
+		exec.Command("sudo", "umount", mountPoint).Run()
+	}()
+	
+	// Copy data
+	copyCmd := exec.Command("sudo", "cp", "-a", sourceDir+"/.", mountPoint)
+	if err := copyCmd.Run(); err != nil {
+		return fmt.Errorf("failed to copy data: %w", err)
+	}
+	
+	return nil
+}
+
+// sanitizeRef converts image reference to safe filename
+func sanitizeRef(ref string) string {
+	ref = strings.ReplaceAll(ref, "/", "_")
+	ref = strings.ReplaceAll(ref, ":", "_")
+	ref = strings.ReplaceAll(ref, ".", "_")
+	return ref
 }

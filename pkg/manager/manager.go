@@ -13,7 +13,6 @@ import (
 
 	"micropod/pkg/config"
 	"micropod/pkg/firecracker"
-	"micropod/pkg/image"
 	"micropod/pkg/rootfs"
 	"micropod/pkg/state"
 )
@@ -21,8 +20,7 @@ import (
 type Manager struct {
 	config 			  *config.Config
 	store         *state.Store
-	imageService  image.ImageService
-	rootfsCreator *rootfs.Creator
+	cowService    *rootfs.CowService
 }
 
 type VMConfig struct {
@@ -41,21 +39,19 @@ func NewManager() *Manager {
 		log.Fatal("Error initializing store:", err)
 	}
 
-	imageService, err := image.NewManager(cfg.GetImageDir())
+	// Initialize CoW service with image directory and device/cow directories
+	deviceDir := filepath.Join(cfg.GetRootfsDir(), "devices")
+	cowDir := filepath.Join(cfg.GetRootfsDir(), "cow")
+	
+	cowService, err := rootfs.NewCowService(cfg.GetImageDir(), deviceDir, cowDir)
 	if err != nil {
-		log.Fatal("Error initializing image service:", err)
-	}
-
-	rootfsCreator, err := rootfs.NewCreator(cfg.GetRootfsDir())
-	if err != nil {
-		log.Fatal("Error initializing rootfs creator:", err)
+		log.Fatal("Error initializing CoW service:", err)
 	}
 
 	return &Manager{
-		config:        cfg,
-		store:         store,
-		imageService:  imageService,
-		rootfsCreator: rootfsCreator,
+		config:     cfg,
+		store:      store,
+		cowService: cowService,
 	}
 }
 
@@ -65,30 +61,13 @@ func (m *Manager) RunVM(imageName string) (string, error) {
 	vmID := uuid.New().String()
 	ctx := context.Background()
 
-	// Pull the image if not exists locally
-	_, err := m.imageService.PullImage(ctx, imageName)
+	// Create CoW rootfs device for this VM
+	cowRootfs, err := m.cowService.CreateRootFS(ctx, imageName, vmID)
 	if err != nil {
-		return "", fmt.Errorf("failed to pull image: %w", err)
-	}
-
-	// Create temporary directory for unpacking
-	tempDir := filepath.Join("/tmp", "micropod-unpack-"+vmID)
-	defer os.RemoveAll(tempDir)
-
-	// Unpack the image to the temporary directory
-	_, err = m.imageService.Unpack(ctx, imageName, tempDir)
-	if err != nil {
-		return "", fmt.Errorf("failed to unpack image: %w", err)
-	}
-
-	// Create ext4 rootfs from the unpacked directory
-	rootfsPath, err := m.rootfsCreator.CreateFromDir(tempDir, vmID)
-	if err != nil {
-		return "", fmt.Errorf("failed to create rootfs: %w", err)
+		return "", fmt.Errorf("failed to create CoW rootfs: %w", err)
 	}
 
 	kernelPath := m.config.GetKernelPath()
-
 	socketPath := m.getSocketPath(vmID)
 
 	client := firecracker.NewClient(socketPath)
@@ -98,8 +77,19 @@ func (m *Manager) RunVM(imageName string) (string, error) {
 		MemoryMB: 512,
 	}
 
-	if err := client.LaunchVM(kernelPath, rootfsPath, config.VCPUs, config.MemoryMB); err != nil {
-		m.rootfsCreator.RemoveRootfs(rootfsPath)
+	// 构建 Firecracker 启动配置
+	fcConfig := firecracker.LaunchConfig{
+		KernelPath: kernelPath,
+		RootfsPath: cowRootfs.DevicePath,
+		VCPUs:      int64(config.VCPUs),
+		MemoryMB:   int64(config.MemoryMB),
+		SocketPath: socketPath,
+		BootArgs:   "console=ttyS0 reboot=k panic=1 pci=off",
+	}
+
+	// Launch VM using CoW device path
+	if err := client.Launch(fcConfig); err != nil {
+		m.cowService.RemoveRootFS(vmID)
 		return "", fmt.Errorf("failed to launch VM: %w", err)
 	}
 
@@ -109,23 +99,23 @@ func (m *Manager) RunVM(imageName string) (string, error) {
 		State:          "Running",
 		FirecrackerPid: client.GetPID(),
 		VMSocketPath:   socketPath,
-		RootfsPath:     rootfsPath,
+		RootfsPath:     cowRootfs.DevicePath,
 		KernelPath:     kernelPath,
 		CreatedAt:      time.Now(),
 	}
 
 	if err := m.store.AddVM(vm); err != nil {
 		client.Stop()
-		m.rootfsCreator.RemoveRootfs(rootfsPath)
+		m.cowService.RemoveRootFS(vmID)
 		return "", fmt.Errorf("failed to store VM state: %w", err)
 	}
 
-	fmt.Printf("VM launched successfully\n")
+	fmt.Printf("VM launched successfully with CoW optimization\n")
 	fmt.Printf("  VM ID: %s\n", vmID)
 	fmt.Printf("  Image: %s\n", imageName)
 	fmt.Printf("  PID: %d\n", client.GetPID())
 	fmt.Printf("  Socket: %s\n", socketPath)
-	fmt.Printf("  Rootfs: %s\n", rootfsPath)
+	fmt.Printf("  CoW Device: %s\n", cowRootfs.DevicePath)
 
 	return vmID, nil
 }
@@ -156,10 +146,20 @@ func (m *Manager) StopVM(vmID string) error {
 
 	fmt.Printf("Stopping VM: %s\n", vmID)
 
-	if m.isProcessRunning(vm.FirecrackerPid) {
-		if err := m.killProcess(vm.FirecrackerPid); err != nil {
-			fmt.Printf("Warning: failed to kill process %d: %v\n", vm.FirecrackerPid, err)
+	// 尝试通过存储的 socket 路径重新连接并优雅停止 VM
+	if _, err := os.Stat(vm.VMSocketPath); err == nil {
+		fmt.Printf("Found socket %s, attempting graceful shutdown\n", vm.VMSocketPath)
+		client := firecracker.NewClient(vm.VMSocketPath)
+		if err := client.Stop(); err != nil {
+			fmt.Printf("Warning: failed to stop VM gracefully: %v\n", err)
+			// Fallback to process kill
+			m.fallbackKillProcess(vm)
+		} else {
+			fmt.Printf("VM stopped gracefully using Firecracker SDK\n")
 		}
+	} else {
+		fmt.Printf("Socket %s not found, using fallback process termination\n", vm.VMSocketPath)
+		m.fallbackKillProcess(vm)
 	}
 
 	if err := m.cleanup(vm); err != nil {
@@ -210,6 +210,14 @@ func (m *Manager) killProcess(pid int) error {
 	return err
 }
 
+func (m *Manager) fallbackKillProcess(vm *state.VM) {
+	if m.isProcessRunning(vm.FirecrackerPid) {
+		if err := m.killProcess(vm.FirecrackerPid); err != nil {
+			fmt.Printf("Warning: failed to kill process %d: %v\n", vm.FirecrackerPid, err)
+		}
+	}
+}
+
 func (m *Manager) cleanup(vm *state.VM) error {
 	var errors []error
 
@@ -217,8 +225,8 @@ func (m *Manager) cleanup(vm *state.VM) error {
 		errors = append(errors, fmt.Errorf("failed to remove socket: %w", err))
 	}
 
-	if err := m.rootfsCreator.RemoveRootfs(vm.RootfsPath); err != nil {
-		errors = append(errors, fmt.Errorf("failed to remove rootfs: %w", err))
+	if err := m.cowService.RemoveRootFS(vm.ID); err != nil {
+		errors = append(errors, fmt.Errorf("failed to remove CoW rootfs: %w", err))
 	}
 
 	if len(errors) > 0 {
@@ -238,4 +246,14 @@ func (m *Manager) cleanupDeadVM(vm state.VM) {
 	if err := m.store.RemoveVM(vm.ID); err != nil {
 		fmt.Printf("Warning: failed to remove dead VM %s from state: %v\n", vm.ID, err)
 	}
+}
+
+// CleanupUnusedBaseImages removes base images that are no longer referenced
+func (m *Manager) CleanupUnusedBaseImages() error {
+	return m.cowService.CleanupUnusedBaseDevices()
+}
+
+// GetActiveRootFS returns information about active CoW root filesystems
+func (m *Manager) GetActiveRootFS() []rootfs.CowRootFS {
+	return m.cowService.ListActiveRootFS()
 }
