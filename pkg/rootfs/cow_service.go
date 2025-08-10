@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	
 	"micropod/pkg/cow"
@@ -105,11 +107,27 @@ func (s *CowService) cleanupOrphanedDevice(vmID string) error {
 	fmt.Printf("Attempting to cleanup orphaned device: %s\n", snapshotName)
 	fmt.Printf("CoW file path: %s\n", cowPath)
 	
-	// 尝试移除设备映射（如果存在）
-	if err := s.cowManager.RemoveDeviceMapping(snapshotName); err != nil {
-		fmt.Printf("Note: failed to remove device mapping %s: %v (may not exist)\n", snapshotName, err)
+	// 先查找并清理相关的 loop 设备（必须先做，因为设备映射依赖于它们）
+	s.cleanupRelatedLoopDevices(cowPath)
+	
+	// 然后尝试移除设备映射
+	devicePath := fmt.Sprintf("/dev/mapper/%s", snapshotName)
+	if _, err := os.Stat(devicePath); err == nil {
+		fmt.Printf("Device mapping exists, attempting to remove: %s\n", snapshotName)
+		if err := s.cowManager.RemoveDeviceMapping(snapshotName); err != nil {
+			fmt.Printf("Warning: failed to remove device mapping %s: %v\n", snapshotName, err)
+			// 尝试更强制的方法
+			fmt.Printf("Attempting force removal of device mapping: %s\n", snapshotName)
+			if err := exec.Command("sudo", "dmsetup", "remove", "--force", snapshotName).Run(); err != nil {
+				fmt.Printf("Warning: force removal also failed for %s: %v\n", snapshotName, err)
+			} else {
+				fmt.Printf("Successfully force-removed device mapping: %s\n", snapshotName)
+			}
+		} else {
+			fmt.Printf("Successfully removed device mapping: %s\n", snapshotName)
+		}
 	} else {
-		fmt.Printf("Successfully removed device mapping: %s\n", snapshotName)
+		fmt.Printf("Device mapping %s does not exist, skipping\n", snapshotName)
 	}
 	
 	// 清理 CoW 文件（如果存在）
@@ -117,9 +135,45 @@ func (s *CowService) cleanupOrphanedDevice(vmID string) error {
 		fmt.Printf("Warning: failed to remove CoW file %s: %v\n", cowPath, err)
 	} else if err == nil {
 		fmt.Printf("Successfully removed CoW file: %s\n", cowPath)
+	} else {
+		fmt.Printf("CoW file %s does not exist\n", cowPath)
 	}
 	
 	return nil
+}
+
+// cleanupRelatedLoopDevices 清理与 CoW 文件相关的 loop 设备
+func (s *CowService) cleanupRelatedLoopDevices(cowPath string) {
+	// 使用 losetup 查找与此文件相关的 loop 设备
+	cmd := exec.Command("losetup", "-j", cowPath)
+	output, err := cmd.Output()
+	if err != nil {
+		fmt.Printf("Note: failed to check loop devices for %s: %v\n", cowPath, err)
+		return
+	}
+	
+	if len(output) == 0 {
+		fmt.Printf("No loop devices found for %s\n", cowPath)
+		return
+	}
+	
+	// 解析输出并清理 loop 设备
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, line := range lines {
+		// 格式: /dev/loop0: [device]:inode (path)
+		if strings.Contains(line, ":") {
+			parts := strings.Split(line, ":")
+			if len(parts) > 0 {
+				loopDev := strings.TrimSpace(parts[0])
+				fmt.Printf("Found loop device %s for %s, attempting to detach\n", loopDev, cowPath)
+				if err := exec.Command("sudo", "losetup", "-d", loopDev).Run(); err != nil {
+					fmt.Printf("Warning: failed to detach loop device %s: %v\n", loopDev, err)
+				} else {
+					fmt.Printf("Successfully detached loop device: %s\n", loopDev)
+				}
+			}
+		}
+	}
 }
 
 func (s *CowService) CleanupUnusedBaseDevices() error {

@@ -162,6 +162,23 @@ func (m *Manager) StopVM(vmID string) error {
 		m.fallbackKillProcess(vm)
 	}
 
+	// 确保进程被强制终止（因为进程可能仍持有设备文件描述符）
+	fmt.Printf("Ensuring Firecracker process %d is terminated...\n", vm.FirecrackerPid)
+	if m.isProcessRunning(vm.FirecrackerPid) {
+		fmt.Printf("Process %d still running, force killing\n", vm.FirecrackerPid)
+		if err := m.killProcess(vm.FirecrackerPid); err != nil {
+			fmt.Printf("Warning: failed to force kill process %d: %v\n", vm.FirecrackerPid, err)
+		} else {
+			fmt.Printf("Process %d force killed successfully\n", vm.FirecrackerPid)
+		}
+	} else {
+		fmt.Printf("Process %d already exited\n", vm.FirecrackerPid)
+	}
+	
+	// 等待一点时间让系统释放资源
+	fmt.Printf("Waiting for system to release device resources...\n")
+	time.Sleep(2 * time.Second)
+
 	if err := m.cleanup(vm); err != nil {
 		fmt.Printf("Warning: cleanup failed: %v\n", err)
 	}
